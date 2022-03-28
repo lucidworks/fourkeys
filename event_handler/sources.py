@@ -131,4 +131,5 @@ AUTHORIZED_SOURCES = {
     "circleci": EventSource(
         "Circleci-Signature", circleci_verification
         ),
+# TODO: add jenkins, argocd
 }
