@@ -18,7 +18,6 @@ import json
 
 import shared
 
-from cloudevents.http import from_http, to_json
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -31,11 +30,11 @@ def index():
     Parses the message, and inserts it into BigQuery.
     """
     event = None
+    # Check request for JSON
+    if not request.is_json:
+        raise Exception("Expecting JSON payload")
     envelope = request.get_json()
 
-    # Check that data has been posted
-    if not envelope:
-        raise Exception("Expecting JSON payload")
     # Check that message is a valid pub/sub message
     if "message" not in envelope:
         raise Exception("Not a valid Pub/Sub Message")
@@ -45,12 +44,10 @@ def index():
         raise Exception("Missing pubsub attributes")
 
     try:
-        attr = msg["attributes"]
-
-        if "headers" in attr:
-            headers = json.loads(attr["headers"])
-
-            event = process_tekton_event(headers, msg)
+        event = process_pagerduty_event(msg)
+        print(f" Event which is to be inserted into Big query {event}")
+        if event:
+            # [Do not edit below]
             shared.insert_row_into_bigquery(event)
 
     except Exception as e:
@@ -60,32 +57,35 @@ def index():
                 "errors": str(e),
                 "json_payload": envelope
             }
-        print(json.dumps(entry))
-
+        print(f"EXCEPTION raised  {json.dumps(entry)}")
     return "", 204
 
 
-def process_tekton_event(headers, msg):
-    data = base64.b64decode(msg["data"]).decode("utf-8").strip()
-    cloud_event = from_http(headers, data)
+def process_pagerduty_event(msg):
+    metadata = json.loads(base64.b64decode(msg["data"]).decode("utf-8").strip())
 
-    if "pipelineRun" in cloud_event.data:
-        uid = cloud_event.data["pipelineRun"]["metadata"]["uid"]
+    print(f"Metadata after decoding {metadata}")
 
-    if "taskRun" in cloud_event.data:
-        uid = cloud_event.data["taskRun"]["metadata"]["uid"]
+    # Unique hash for the event
+    signature = shared.create_unique_id(msg)
+    event = metadata['event']
+    event_type = event["event_type"]
+    types = {"incident.triggered", "incident.resolved"}
+    if event_type not in types:
+        raise Warning("Unsupported PagerDuty event: '%s'" % event_type)
 
-    event = {
-        "event_type": cloud_event["type"],
-        "id": uid,  # ID of the taskRun or pipelineRun
-        "metadata": to_json(cloud_event).decode(),
-        "time_created": cloud_event["time"],
-        "signature": cloud_event["id"],  # Unique ID for the event
+    pagerduty_event = {
+        "event_type": event_type,  # Event type, eg "incident.trigger", "incident.resolved", etc
+        "id": event['id'],  # Event ID,
+        "metadata": json.dumps(metadata),  # The body of the msg
+        "signature": signature,  # The unique event signature
         "msg_id": msg["message_id"],  # The pubsub message id
-        "source": "tekton",
-    }
+        "time_created" : event['occurred_at'],  # The timestamp of with the event resolved
+        "source": "pagerduty",  # The name of the source, eg "pagerduty"
+        }
 
-    return event
+    print(f"Pager Duty event to metrics--------> {pagerduty_event}")
+    return pagerduty_event
 
 
 if __name__ == "__main__":
